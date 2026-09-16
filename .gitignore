@@ -25,3 +25,6 @@ Thumbs.db
 coverage/
 dist/
 build/
+
+# API call logs
+result/
