@@ -114,8 +114,17 @@ router.get('/order', async function (req, res) {
     if (!menu) {
       return stop(res, 'MENU_NOT_FOUND', { date: today, mealType: mealType });
     }
+
+    var usedFallback = false;
     if (menu.Status === 'CLOSED') {
-      return stop(res, 'MENU_CLOSED', menu);
+      var fallbackMenu = (menuResp.value || []).find(function (m) {
+        return m.Type !== mealType && m.Status !== 'CLOSED';
+      });
+      if (!fallbackMenu) {
+        return stop(res, 'MENU_CLOSED', menu);
+      }
+      menu = fallbackMenu;
+      usedFallback = true;
     }
 
     var reserveResp = await callApi('/api/V2/LunchParticipant/Reserve', {
@@ -124,7 +133,14 @@ router.get('/order', async function (req, res) {
       body: JSON.stringify({ FoodMenuID: menu.ID, NIK: NIK })
     }, log, 'Reserve');
 
-    res.json({ ok: true, reason: 'RESERVED', foodMenuId: menu.ID, mealType: mealType, detail: reserveResp });
+    res.json({
+      ok: true,
+      reason: usedFallback ? 'RESERVED_FALLBACK' : 'RESERVED',
+      foodMenuId: menu.ID,
+      mealType: menu.Type,
+      requestedMealType: mealType,
+      detail: reserveResp
+    });
   } catch (err) {
     log('Error', { message: err.message, body: err.body || null });
     res.status(502).json({ ok: false, reason: 'UPSTREAM_ERROR', detail: err.body || err.message });
