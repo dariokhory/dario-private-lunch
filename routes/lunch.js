@@ -44,19 +44,19 @@ async function callApi(path, options, log, label) {
   return body;
 }
 
-function stop(res, reason, detail) {
-  res.status(200).json({ ok: false, reason: reason, detail: detail || null });
+function stop(reason, detail) {
+  return { status: 200, body: { ok: false, reason: reason, detail: detail || null } };
 }
 
-router.get('/order', async function (req, res) {
+async function runLunchOrder() {
   var log = createLogger();
   try {
     if (!NIK || !USERNAME || !PASSWORD) {
-      return res.status(500).json({
+      return { status: 500, body: {
         ok: false,
         reason: 'MISSING_CREDENTIALS',
         detail: 'Set WARUNA_NIK, WARUNA_USERNAME and WARUNA_PASSWORD in .env'
-      });
+      } };
     }
 
     var serverTimeResp = await callApi('/api/v2/Util/ServerTime', { method: 'GET' }, log, 'ServerTime');
@@ -71,7 +71,7 @@ router.get('/order', async function (req, res) {
     }, log, 'Login');
     var token = loginResp.AccessToken;
     if (!token) {
-      return stop(res, 'LOGIN_FAILED', loginResp);
+      return stop('LOGIN_FAILED', loginResp);
     }
     var authHeaders = { Authorization: 'Bearer ' + token };
 
@@ -86,7 +86,7 @@ router.get('/order', async function (req, res) {
     var startTime = startCfg.value && startCfg.value[0] && startCfg.value[0].ValueString;
     var endTime = endCfg.value && endCfg.value[0] && endCfg.value[0].ValueString;
     if (!startTime || !endTime || currentTime < startTime || currentTime > endTime) {
-      return stop(res, 'OUTSIDE_RESERVATION_WINDOW', { currentTime: currentTime, startTime: startTime, endTime: endTime });
+      return stop('OUTSIDE_RESERVATION_WINDOW', { currentTime: currentTime, startTime: startTime, endTime: endTime });
     }
 
     var participantFilter = "ReserveTime eq " + today + " and NIK eq '" + NIK + "'";
@@ -95,13 +95,13 @@ router.get('/order', async function (req, res) {
       { headers: authHeaders }, log, 'LunchParticipant'
     );
     if (participantResp.value && participantResp.value.length > 0) {
-      return stop(res, 'ALREADY_RESERVED', participantResp.value[0]);
+      return stop('ALREADY_RESERVED', participantResp.value[0]);
     }
 
     var hrisResp = await callApi('/api/v2/HRISUser2/' + encodeURIComponent(NIK), { headers: authHeaders }, log, 'HRISUser2');
     var user = hrisResp.value && hrisResp.value[0];
     if (!user || !user.Meal) {
-      return stop(res, 'USER_MEAL_NOT_FOUND', hrisResp);
+      return stop('USER_MEAL_NOT_FOUND', hrisResp);
     }
     var mealType = MEAL_TYPE_MAP[user.Meal] || user.Meal;
 
@@ -112,7 +112,7 @@ router.get('/order', async function (req, res) {
     );
     var menu = (menuResp.value || []).find(function (m) { return m.Type === mealType; });
     if (!menu) {
-      return stop(res, 'MENU_NOT_FOUND', { date: today, mealType: mealType });
+      return stop('MENU_NOT_FOUND', { date: today, mealType: mealType });
     }
 
     var usedFallback = false;
@@ -121,7 +121,7 @@ router.get('/order', async function (req, res) {
         return m.Type !== mealType && m.Status !== 'CLOSED';
       });
       if (!fallbackMenu) {
-        return stop(res, 'MENU_CLOSED', menu);
+        return stop('MENU_CLOSED', menu);
       }
       menu = fallbackMenu;
       usedFallback = true;
@@ -133,18 +133,23 @@ router.get('/order', async function (req, res) {
       body: JSON.stringify({ FoodMenuID: menu.ID, NIK: NIK })
     }, log, 'Reserve');
 
-    res.json({
+    return { status: 200, body: {
       ok: true,
       reason: usedFallback ? 'RESERVED_FALLBACK' : 'RESERVED',
       foodMenuId: menu.ID,
       mealType: menu.Type,
       requestedMealType: mealType,
       detail: reserveResp
-    });
+    } };
   } catch (err) {
     log('Error', { message: err.message, body: err.body || null });
-    res.status(502).json({ ok: false, reason: 'UPSTREAM_ERROR', detail: err.body || err.message });
+    return { status: 502, body: { ok: false, reason: 'UPSTREAM_ERROR', detail: err.body || err.message } };
   }
+}
+
+router.get('/order', async function (req, res) {
+  var result = await runLunchOrder();
+  res.status(result.status).json(result.body);
 });
 
-module.exports = router;
+module.exports = { router: router, runLunchOrder: runLunchOrder };
