@@ -186,6 +186,7 @@ router.get('/cron', async function (req, res) {
   }
 
   var result = await runScheduledLunchOrder();
+  console.log('[cron] Result:', JSON.stringify(result.body));
   res.status(result.status).json(result.body);
 });
 
