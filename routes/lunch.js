@@ -152,4 +152,36 @@ router.get('/order', async function (req, res) {
   res.status(result.status).json(result.body);
 });
 
+function parseRunDates(value) {
+  return new Set((value || '').split(',').map(function (date) { return date.trim(); }).filter(Boolean));
+}
+
+function localDate(timezone) {
+  var parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(new Date());
+  function value(type) {
+    return parts.find(function (part) { return part.type === type; }).value;
+  }
+  return value('year') + '-' + value('month') + '-' + value('day');
+}
+
+router.get('/cron', async function (req, res) {
+  var secret = process.env.CRON_SECRET;
+  if (!secret || req.headers.authorization !== 'Bearer ' + secret) {
+    return res.status(401).json({ ok: false, reason: 'UNAUTHORIZED' });
+  }
+
+  var runDates = parseRunDates(process.env.LUNCH_RUN_DATES);
+  var timezone = process.env.LUNCH_TIMEZONE || 'Asia/Jakarta';
+  var today = localDate(timezone);
+  if (!runDates.has(today)) {
+    return res.status(200).json({ ok: false, reason: 'NOT_A_RUN_DATE', detail: { today: today } });
+  }
+
+  var result = await runLunchOrder();
+  res.status(result.status).json(result.body);
+});
+
 module.exports = { router: router, runLunchOrder: runLunchOrder };
