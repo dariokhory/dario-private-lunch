@@ -26,6 +26,7 @@ function createLogger() {
     var entry = '=== ' + label + ' (' + new Date().toISOString() + ') ===\n' +
       JSON.stringify(data, null, 2) + '\n\n';
     fs.appendFileSync(filePath, entry);
+    console.log('[lunch] ' + label + ':', JSON.stringify(data));
   };
 }
 
@@ -167,21 +168,25 @@ function localDate(timezone) {
   return value('year') + '-' + value('month') + '-' + value('day');
 }
 
+async function runScheduledLunchOrder() {
+  var runDates = parseRunDates(process.env.LUNCH_RUN_DATES);
+  var timezone = process.env.LUNCH_TIMEZONE || 'Asia/Jakarta';
+  var today = localDate(timezone);
+  if (!runDates.has(today)) {
+    return { status: 200, body: { ok: false, reason: 'NOT_A_RUN_DATE', detail: { today: today } } };
+  }
+
+  return runLunchOrder();
+}
+
 router.get('/cron', async function (req, res) {
   var secret = process.env.CRON_SECRET;
   if (!secret || req.headers.authorization !== 'Bearer ' + secret) {
     return res.status(401).json({ ok: false, reason: 'UNAUTHORIZED' });
   }
 
-  var runDates = parseRunDates(process.env.LUNCH_RUN_DATES);
-  var timezone = process.env.LUNCH_TIMEZONE || 'Asia/Jakarta';
-  var today = localDate(timezone);
-  if (!runDates.has(today)) {
-    return res.status(200).json({ ok: false, reason: 'NOT_A_RUN_DATE', detail: { today: today } });
-  }
-
-  var result = await runLunchOrder();
+  var result = await runScheduledLunchOrder();
   res.status(result.status).json(result.body);
 });
 
-module.exports = { router: router, runLunchOrder: runLunchOrder };
+module.exports = { router: router, runLunchOrder: runLunchOrder, runScheduledLunchOrder: runScheduledLunchOrder };
