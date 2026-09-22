@@ -16,16 +16,27 @@ var MEAL_TYPE_MAP = {
 };
 
 function createLogger() {
-  if (!fs.existsSync(RESULT_DIR)) {
-    fs.mkdirSync(RESULT_DIR, { recursive: true });
+  var filePath = null;
+  try {
+    if (!fs.existsSync(RESULT_DIR)) {
+      fs.mkdirSync(RESULT_DIR, { recursive: true });
+    }
+    var fileName = new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
+    filePath = path.join(RESULT_DIR, fileName);
+  } catch (err) {
+    console.error('[lunch] Unable to create log file, falling back to console only:', err.message);
   }
-  var fileName = new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
-  var filePath = path.join(RESULT_DIR, fileName);
 
   return function log(label, data) {
     var entry = '=== ' + label + ' (' + new Date().toISOString() + ') ===\n' +
       JSON.stringify(data, null, 2) + '\n\n';
-    fs.appendFileSync(filePath, entry);
+    if (filePath) {
+      try {
+        fs.appendFileSync(filePath, entry);
+      } catch (err) {
+        console.error('[lunch] Unable to write log file:', err.message);
+      }
+    }
     console.log('[lunch] ' + label + ':', JSON.stringify(data));
   };
 }
