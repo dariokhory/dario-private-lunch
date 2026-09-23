@@ -7,6 +7,7 @@ var BASE_URL = process.env.WARUNA_BASE_URL || 'https://api2.waruna.id';
 var NIK = process.env.WARUNA_NIK;
 var USERNAME = process.env.WARUNA_USERNAME;
 var PASSWORD = process.env.WARUNA_PASSWORD;
+var LUNCH_RETRY_MAX_DURATION_MS = 60 * 1000;
 
 var RESULT_DIR = path.join(__dirname, '..', 'result');
 
@@ -41,7 +42,11 @@ function createLogger() {
   };
 }
 
-async function callApi(path, options, log, label) {
+async function callApi(path, options, log, label, signal) {
+  options = Object.assign({}, options || {});
+  if (signal) {
+    options.signal = signal;
+  }
   var res = await fetch(BASE_URL + path, options);
   var body = await res.json().catch(function () { return null; });
   if (log) {
@@ -60,8 +65,10 @@ function stop(reason, detail) {
   return { status: 200, body: { ok: false, reason: reason, detail: detail || null } };
 }
 
-async function runLunchOrder() {
-  var log = createLogger();
+async function attemptLunchOrder(options) {
+  options = options || {};
+  var log = options.log || createLogger();
+  var signal = options.signal;
   try {
     if (!NIK || !USERNAME || !PASSWORD) {
       return { status: 500, body: {
@@ -71,7 +78,7 @@ async function runLunchOrder() {
       } };
     }
 
-    var serverTimeResp = await callApi('/api/v2/Util/ServerTime', { method: 'GET' }, log, 'ServerTime');
+    var serverTimeResp = await callApi('/api/v2/Util/ServerTime', { method: 'GET' }, log, 'ServerTime', signal);
     var serverDateTime = serverTimeResp.serverTime;
     var today = serverDateTime.slice(0, 10);
     var currentTime = serverDateTime.slice(11, 16);
@@ -80,7 +87,7 @@ async function runLunchOrder() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ Username: USERNAME, Password: PASSWORD })
-    }, log, 'Login');
+    }, log, 'Login', signal);
     var token = loginResp.AccessToken;
     if (!token) {
       return stop('LOGIN_FAILED', loginResp);
@@ -89,11 +96,11 @@ async function runLunchOrder() {
 
     var startCfg = await callApi(
       '/api/v1/Config?$filter=' + encodeURIComponent("Key eq 'LUNCH.TIME.START'"),
-      { headers: authHeaders }, log, 'Config-Start'
+      { headers: authHeaders }, log, 'Config-Start', signal
     );
     var endCfg = await callApi(
       '/api/v1/Config?$filter=' + encodeURIComponent("Key eq 'LUNCH.TIME.END'"),
-      { headers: authHeaders }, log, 'Config-End'
+      { headers: authHeaders }, log, 'Config-End', signal
     );
     var startTime = startCfg.value && startCfg.value[0] && startCfg.value[0].ValueString;
     var endTime = endCfg.value && endCfg.value[0] && endCfg.value[0].ValueString;
@@ -104,13 +111,13 @@ async function runLunchOrder() {
     var participantFilter = "ReserveTime eq " + today + " and NIK eq '" + NIK + "'";
     var participantResp = await callApi(
       '/api/v1/LunchParticipant?$filter=' + encodeURIComponent(participantFilter) + '&expand=' + encodeURIComponent('FoodMenu($expand=MenuLists)'),
-      { headers: authHeaders }, log, 'LunchParticipant'
+      { headers: authHeaders }, log, 'LunchParticipant', signal
     );
     if (participantResp.value && participantResp.value.length > 0) {
       return stop('ALREADY_RESERVED', participantResp.value[0]);
     }
 
-    var hrisResp = await callApi('/api/v2/HRISUser2/' + encodeURIComponent(NIK), { headers: authHeaders }, log, 'HRISUser2');
+    var hrisResp = await callApi('/api/v2/HRISUser2/' + encodeURIComponent(NIK), { headers: authHeaders }, log, 'HRISUser2', signal);
     var user = hrisResp.value && hrisResp.value[0];
     if (!user || !user.Meal) {
       return stop('USER_MEAL_NOT_FOUND', hrisResp);
@@ -120,7 +127,7 @@ async function runLunchOrder() {
     var menuFilter = 'Date eq ' + today + ' and Publish eq true';
     var menuResp = await callApi(
       '/api/v1/FoodMenu?$filter=' + encodeURIComponent(menuFilter) + '&$expand=MenuLists',
-      { headers: authHeaders }, log, 'FoodMenu'
+      { headers: authHeaders }, log, 'FoodMenu', signal
     );
     var menu = (menuResp.value || []).find(function (m) { return m.Type === mealType; });
     if (!menu) {
@@ -143,7 +150,7 @@ async function runLunchOrder() {
       method: 'POST',
       headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders),
       body: JSON.stringify({ FoodMenuID: menu.ID, NIK: NIK })
-    }, log, 'Reserve');
+    }, log, 'Reserve', signal);
 
     return { status: 200, body: {
       ok: true,
@@ -156,6 +163,56 @@ async function runLunchOrder() {
   } catch (err) {
     log('Error', { message: err.message, body: err.body || null });
     return { status: 502, body: { ok: false, reason: 'UPSTREAM_ERROR', detail: err.body || err.message } };
+  }
+}
+
+async function runLunchOrder(options) {
+  options = options || {};
+  var maxDurationMs = options.maxDurationMs || LUNCH_RETRY_MAX_DURATION_MS;
+  var attempt = options.attempt || attemptLunchOrder;
+  var startedAt = Date.now();
+  var attempts = 0;
+  var lastOutsideResult = null;
+  var log = createLogger();
+  var controller = new AbortController();
+  var timeout = setTimeout(function () {
+    controller.abort();
+  }, maxDurationMs);
+
+  try {
+    while (!controller.signal.aborted) {
+      attempts += 1;
+      var result = await attempt({ signal: controller.signal, log: log });
+      var reason = result && result.body && result.body.reason;
+
+      if (reason !== 'OUTSIDE_RESERVATION_WINDOW') {
+        // An aborted fetch is reported by attemptLunchOrder as UPSTREAM_ERROR.
+        // Convert only that deadline-induced error into the retry timeout response.
+        if (controller.signal.aborted && reason === 'UPSTREAM_ERROR') {
+          break;
+        }
+        return result;
+      }
+
+      lastOutsideResult = result;
+      if (Date.now() - startedAt >= maxDurationMs) {
+        break;
+      }
+    }
+
+    var timeoutBody = {
+      ok: false,
+      reason: 'RETRY_TIMEOUT',
+      detail: {
+        maxDurationMs: maxDurationMs,
+        attempts: attempts,
+        lastResponse: lastOutsideResult && lastOutsideResult.body
+      }
+    };
+    log('RetryTimeout', timeoutBody);
+    return { status: 200, body: timeoutBody };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -201,4 +258,9 @@ router.get('/cron', async function (req, res) {
   res.status(result.status).json(result.body);
 });
 
-module.exports = { router: router, runLunchOrder: runLunchOrder, runScheduledLunchOrder: runScheduledLunchOrder };
+module.exports = {
+  router: router,
+  runLunchOrder: runLunchOrder,
+  runScheduledLunchOrder: runScheduledLunchOrder,
+  attemptLunchOrder: attemptLunchOrder
+};
