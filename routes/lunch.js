@@ -7,7 +7,7 @@ var BASE_URL = process.env.WARUNA_BASE_URL || 'https://api2.waruna.id';
 var NIK = process.env.WARUNA_NIK;
 var USERNAME = process.env.WARUNA_USERNAME;
 var PASSWORD = process.env.WARUNA_PASSWORD;
-var LUNCH_RETRY_MAX_DURATION_MS = 60 * 1000;
+var LUNCH_RETRY_MAX_DURATION_MS = 2 * 60 * 1000;
 
 var RESULT_DIR = path.join(__dirname, '..', 'result');
 
